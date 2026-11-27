@@ -1,22 +1,24 @@
-"""PortWatch VI -> Discord. Run on Windows or Linux with Python 3.9+.
-Install with python -m pip install python-dotenv "colorama>=0.4.6". Set DISCORD_WEBHOOK_URL in .env beside this script. Optional WATCH_REPOS is a
-comma-separated owner/repo allowlist. Optional GITHUB_TOKEN raises API limits.
-Keep portwatch.sqlite3 beside this file. Stop with Ctrl+C.
+"""PortWatch VI -> Discord & Fluxer. Run on Windows or Linux with Python 3.9+.
+Install with python -m pip install python-dotenv "colorama>=0.4.6". Set
+DISCORD_WEBHOOK_URL and/or FLUXER_WEBHOOK_URL in .env beside this script.
+Optional WATCH_REPOS is a comma-separated owner/repo allowlist. Optional
+GITHUB_TOKEN raises API limits. Keep portwatch.sqlite3 beside this file.
+Stop with Ctrl+C.
 """
 import argparse
 from collections import Counter
-import math
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import math
 import os
+from pathlib import Path
 import re
 import sqlite3
 import sys
 import time
-from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit, urlunsplit, parse_qsl
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from colorama import Fore, Style, just_fix_windows_console
@@ -45,7 +47,7 @@ def log(level, message):
 
 
 def fetch(url, payload=None, token=None):
-    headers = {"User-Agent": "PortWatch-Discord-Watcher/1.0"}
+    headers = {"User-Agent": "PortWatch-Webhook-Watcher/1.1"}
     data = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -58,8 +60,12 @@ def fetch(url, payload=None, token=None):
 
 
 def progress(row):
-    return {"name": row["name"], "repo": row.get("repo"),
-            "tier": row.get("tier"), **(row.get("gta") or {})}
+    return {
+        "name": row["name"],
+        "repo": row.get("repo"),
+        "tier": row.get("tier"),
+        **(row.get("gta") or {}),
+    }
 
 
 def github_skip_reason(exc):
@@ -82,13 +88,36 @@ AMBER = 0xF0B232
 GRAY = 0x747F8D
 
 
+def normalize_fields(fields):
+    if not fields:
+        return None
+    cleaned = []
+    for field in fields[:25]:
+        cleaned.append({
+            "name": str(field.get("name", ""))[:256] or "\u200b",
+            "value": str(field.get("value", ""))[:1024] or "\u200b",
+            "inline": bool(field.get("inline", False)),
+        })
+    return cleaned
+
+
 def embed_message(title, description, color=PURPLE, fields=None):
-    embed = {"title": title[:256], "url": SITE, "description": description[:4096],
-             "color": color, "timestamp": datetime.now(timezone.utc).isoformat(),
-             "footer": {"text": "PortWatch VI"}}
-    if fields:
-        embed["fields"] = fields
-    return {"username": "PortWatch VI", "embeds": [embed], "allowed_mentions": {"parse": []}}
+    embed = {
+        "title": str(title)[:256],
+        "url": SITE,
+        "description": str(description)[:4096],
+        "color": color,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "footer": {"text": "PortWatch VI"},
+    }
+    norm_fields = normalize_fields(fields)
+    if norm_fields:
+        embed["fields"] = norm_fields
+    return {
+        "username": "PortWatch VI",
+        "embeds": [embed],
+        "allowed_mentions": {"parse": []},
+    }
 
 
 def clamp(value):
@@ -103,8 +132,15 @@ def port_score(row):
     """PortWatch's assets/js/scoring.js model, inspected 2026-11-26."""
     gta = row.get("gta") or {}
     groundwork = row.get("groundwork") or {}
-    score = 10 * sum(weight * clamp(groundwork.get(key)) for key, weight in
-                     [("loader", .2), ("shaders", .28), ("graphics", .32), ("proven", .2)])
+    score = 10 * sum(
+        weight * clamp(groundwork.get(key))
+        for key, weight in [
+            ("loader", 0.2),
+            ("shaders", 0.28),
+            ("graphics", 0.32),
+            ("proven", 0.2),
+        ]
+    )
     for tick, key in enumerate(["loads", "boots", "menu", "world", "playable"], 1):
         value = clamp(gta.get(key))
         if value < 1:
@@ -114,34 +150,58 @@ def port_score(row):
     else:
         stability = gta.get("stability")
         if not isinstance(stability, (int, float)):
-            stability = {"constant": 0, "often": .25, "sometimes": .55,
-                         "rarely": .8, "stable": 1}.get(stability, 0)
+            stability = {
+                "constant": 0,
+                "often": 0.25,
+                "sometimes": 0.55,
+                "rarely": 0.8,
+                "stable": 1,
+            }.get(stability, 0)
         try:
             performance = clamp(float(gta.get("fps") or 0) / 30)
         except (TypeError, ValueError):
             performance = 0
-        score = 50 + 50 * (.35 * clamp(gta.get("story")) + .25 * clamp(gta.get("render"))
-                           + .2 * performance + .2 * clamp(stability))
+        score = 50 + 50 * (
+            0.35 * clamp(gta.get("story"))
+            + 0.25 * clamp(gta.get("render"))
+            + 0.2 * performance
+            + 0.2 * clamp(stability)
+        )
     manual = row.get("manualScore")
     if type(manual) in (int, float) and math.isfinite(manual):
         score = min(100, max(0, manual))
-    return math.floor(score * 10 + .5) / 10
+    return math.floor(score * 10 + 0.5) / 10
 
 
 def leader_field(rows):
     eligible = [row for row in rows if not row.get("nuked")]
     if not eligible:
-        return {"name": "Closest to a full port", "value": "No active projects available to rank.", "inline": False}
-    leader = max(eligible, key=lambda row: (port_score(row), (row.get("stats") or {}).get("stars", 0)))
+        return {
+            "name": "Closest to a full port",
+            "value": "No active projects available to rank.",
+            "inline": False,
+        }
+    leader = max(
+        eligible,
+        key=lambda row: (port_score(row), (row.get("stats") or {}).get("stars", 0)),
+    )
     visibility = "public repository" if REPO.fullmatch(leader.get("repo") or "") else "private build"
-    return {"name": "Closest to a full port",
-            "value": f"**{str(leader['name'])[:120]} · {port_score(leader):g}%** ({visibility})\n"
-                     f"[PortWatch progress score]({SITE}/#method), not a release ETA or independently verified completion.",
-            "inline": False}
+    return {
+        "name": "Closest to a full port",
+        "value": (
+            f"**{str(leader['name'])[:120]} · {port_score(leader):g}%** ({visibility})\n"
+            f"[PortWatch progress score]({SITE}/#method), not a release ETA or independently verified completion."
+        ),
+        "inline": False,
+    }
 
 
 def check_report(status, details):
-    return embed_message("PortWatch VI · Progress report", f"🟡 **{status}**\n{details}", AMBER)
+    return embed_message(
+        "PortWatch VI · Progress report",
+        f"🟡 **{status}**\n{details}",
+        AMBER,
+    )
 
 
 def progress_report(rows, checked_branches, skipped, dmca_repos, baseline, updates):
@@ -155,27 +215,46 @@ def progress_report(rows, checked_branches, skipped, dmca_repos, baseline, updat
         headline = "**Tracker checked · GitHub checks complete**"
         color = GRAY
     if baseline:
-        summary = f"Baseline recorded across {len(rows)} tracked projects. Future checks will compare changes."
+        summary = (
+            f"Baseline recorded across {len(rows)} tracked projects. "
+            "Future checks will compare changes."
+        )
     else:
         tracker_updates = sum(1 for item in updates if item.get("kind") == "tracker")
-        summary = (f"{tracker_updates} project updates across {len(rows)} tracked projects." if tracker_updates
-                   else f"No progress changes across {len(rows)} tracked projects.")
+        summary = (
+            f"{tracker_updates} project updates across {len(rows)} tracked projects."
+            if tracker_updates
+            else f"No progress changes across {len(rows)} tracked projects."
+        )
     if updates and skipped:
         headline += "\n" + updates[0]["headline"]
     fields = [leader_field(rows)]
-    fields.extend({"name": name, "value": str(value), "inline": True} for name, value in
-                  [("Projects checked", len(rows)), ("GitHub branches checked", checked_branches),
-                   ("Repos skipped", len(skipped))])
+    fields.extend(
+        {"name": name, "value": str(value), "inline": True}
+        for name, value in [
+            ("Projects checked", len(rows)),
+            ("GitHub branches checked", checked_branches),
+            ("Repos skipped", len(skipped)),
+        ]
+    )
     if skipped:
         counts = Counter(skipped.values())
-        grouped = "\n".join(f"{count} {'repository' if count == 1 else 'repositories'} returned `{reason}`."
-                            for reason, count in sorted(counts.items()))
-        grouped += "\nCommit activity is unknown for " + ("this check." if not checked_branches else "the skipped repositories.")
+        grouped = "\n".join(
+            f"{count} {'repository' if count == 1 else 'repositories'} returned `{reason}`."
+            for reason, count in sorted(counts.items())
+        )
+        grouped += "\nCommit activity is unknown for " + (
+            "this check." if not checked_branches else "the skipped repositories."
+        )
         fields.append({"name": "GitHub status", "value": grouped[:1024], "inline": False})
     if dmca_repos:
         count = len(dmca_repos)
         noun = "repository" if count == 1 else "repositories"
-        fields.append({"name": "Confirmed DMCA blocks", "value": f"{count} {noun} blocked by GitHub. Claimant not verified.", "inline": False})
+        fields.append({
+            "name": "Confirmed DMCA blocks",
+            "value": f"{count} {noun} blocked by GitHub. Claimant not verified.",
+            "inline": False,
+        })
     return embed_message("PortWatch VI · Progress report", headline + "\n" + summary, color, fields)
 
 
@@ -203,12 +282,17 @@ def collect(db, feed, allow, token):
         name = str(row["name"])[:120]
         if key in saved:
             old = json.loads(saved[key])
-            lines = [f"{field}: {old.get(field, 'unknown')} → {current.get(field, 'unknown')}"
-                     for field in sorted(current.keys() | old.keys())
-                     if old.get(field) != current.get(field)]
+            lines = [
+                f"{field}: {old.get(field, 'unknown')} → {current.get(field, 'unknown')}"
+                for field in sorted(current.keys() | old.keys())
+                if old.get(field) != current.get(field)
+            ]
             if lines:
                 fields_changed = [field for field in current if old.get(field) != current.get(field)]
-                field = next((key for key in ["fps", "story", "render", "stability", "playable"] if key in fields_changed), fields_changed[0] if fields_changed else "progress")
+                field = next(
+                    (key for key in ["fps", "story", "render", "stability", "playable"] if key in fields_changed),
+                    fields_changed[0] if fields_changed else "progress",
+                )
                 label = "FPS" if field == "fps" else field.replace("_", " ").capitalize()
                 before, after = old.get(field, "unknown"), current.get(field, "unknown")
                 direction = "changed"
@@ -258,8 +342,10 @@ def collect(db, feed, allow, token):
         status = f"{len(messages)} updates found."
     else:
         status = "No changes found."
-    log("WARN" if skipped else "OK", f"{status} {project_count} projects; {checked_branches} branches checked; "
-          f"{len(skipped)} skipped.")
+    log(
+        "WARN" if skipped else "OK",
+        f"{status} {project_count} projects; {checked_branches} branches checked; {len(skipped)} skipped.",
+    )
     messages.insert(0, progress_report(watched_rows, checked_branches, skipped, dmca_repos, not saved, updates))
     return changes, messages
 
@@ -275,8 +361,10 @@ def open_database(path):
 def save_updates(db, changes, messages):
     # Persist notifications and their snapshot together so a failed send can retry.
     with db:
-        db.executemany("INSERT OR REPLACE INTO snapshot(key,value) VALUES (?,?)",
-                       [(key, json.dumps(value)) for key, value in changes.items()])
+        db.executemany(
+            "INSERT OR REPLACE INTO snapshot(key,value) VALUES (?,?)",
+            [(key, json.dumps(value)) for key, value in changes.items()],
+        )
         for message in messages:
             if isinstance(message, dict):
                 db.execute("INSERT INTO queue(body) VALUES (?)", (json.dumps(message),))
@@ -288,11 +376,17 @@ def save_updates(db, changes, messages):
 def notification_payload(body):
     """Render both existing queued messages and new notifications as embeds."""
     if isinstance(body, dict):
-        return body
+        payload = dict(body)
+        payload.setdefault("username", "PortWatch VI")
+        payload.setdefault("allowed_mentions", {"parse": []})
+        return payload
     try:
         stored = json.loads(body)
         if isinstance(stored, dict) and "embeds" in stored:
-            return stored
+            payload = dict(stored)
+            payload.setdefault("username", "PortWatch VI")
+            payload.setdefault("allowed_mentions", {"parse": []})
+            return payload
     except ValueError:
         pass
     lines = body.splitlines()
@@ -305,26 +399,38 @@ def notification_payload(body):
     embed = {
         "title": title[:256],
         "url": url,
-        "color": 0xBD40CE,
+        "color": PURPLE,
         "footer": {"text": "PortWatch VI · Tracker & repository updates"},
     }
     description = "\n".join(lines).strip()
     if description:
         embed["description"] = description[:4096]
-    return {"username": "PortWatch VI", "embeds": [embed],
-            "allowed_mentions": {"parse": []}}
+    return {
+        "username": "PortWatch VI",
+        "embeds": [embed],
+        "allowed_mentions": {"parse": []},
+    }
 
 
-def deliver(db, webhook):
-    parts = urlsplit(webhook)
+def wait_webhook_url(webhook):
+    parts = urlsplit(webhook.strip())
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError("Invalid webhook URL")
+    clean_path = parts.path.rstrip("/")
     query = dict(parse_qsl(parts.query))
     query["wait"] = "true"
-    url = urlunsplit(parts._replace(query=urlencode(query)))
+    return urlunsplit(parts._replace(path=clean_path, query=urlencode(query)))
+
+
+def deliver(db, webhooks):
+    targets = [(name, wait_webhook_url(url)) for name, url in webhooks]
     for message_id, body in db.execute("SELECT id,body FROM queue ORDER BY id").fetchall():
-        fetch(url, payload=notification_payload(body))
+        payload = notification_payload(body)
+        for target_name, url in targets:
+            fetch(url, payload=payload)
+            log("OK", f"Delivered queued message {message_id} to {target_name}.")
         with db:
             db.execute("DELETE FROM queue WHERE id=?", (message_id,))
-        log("OK", f"Delivered queued message {message_id}.")
 
 
 @contextmanager
@@ -356,6 +462,17 @@ def single_instance(path):
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def configured_webhooks():
+    webhooks = []
+    discord_url = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
+    fluxer_url = (os.getenv("FLUXER_WEBHOOK_URL") or "").strip()
+    if discord_url:
+        webhooks.append(("Discord", discord_url))
+    if fluxer_url:
+        webhooks.append(("Fluxer", fluxer_url))
+    return webhooks
+
+
 def main():
     global SITE
     just_fix_windows_console()
@@ -365,9 +482,9 @@ def main():
     args = parser.parse_args()
     load_dotenv(ROOT / ".env")
     SITE = (os.getenv("SITE") or SITE).rstrip("/")
-    webhook = (os.getenv("DISCORD_WEBHOOK_URL") or "").strip()
-    if not webhook and not args.dry_run:
-        parser.error("Set DISCORD_WEBHOOK_URL in .env")
+    webhooks = configured_webhooks()
+    if not webhooks and not args.dry_run:
+        parser.error("Set DISCORD_WEBHOOK_URL and/or FLUXER_WEBHOOK_URL in .env")
     allow = {repo.strip().lower() for repo in os.getenv("WATCH_REPOS", "").split(",") if repo.strip()}
     token = os.getenv("GITHUB_TOKEN")
     with single_instance(ROOT / "portwatch.lock"):
@@ -392,19 +509,21 @@ def main():
                     except (HTTPError, URLError, OSError, ValueError, KeyError) as exc:
                         detail = f"HTTP {exc.code}" if isinstance(exc, HTTPError) else type(exc).__name__
                         changes = {}
-                        messages = [check_report("Check failed: " + detail,
-                                    "Repository and DMCA counts unavailable for this check.")]
+                        messages = [check_report(
+                            "Check failed: " + detail,
+                            "Repository and DMCA counts unavailable for this check.",
+                        )]
                         check_failed = True
                         log("ERROR", f"Check failed: {detail}.")
                     if args.dry_run:
                         log("INFO", f"Dry run: {len(messages)} notifications; nothing sent or saved.")
                     else:
                         save_updates(db, changes, messages)
-                        deliver(db, webhook)
+                        deliver(db, webhooks)
                     if check_failed and (args.once or args.dry_run):
                         return 1
                 except (HTTPError, URLError, OSError, ValueError, KeyError) as exc:
-                    # Do not log exception URLs: Discord URLs contain the webhook token.
+                    # Do not log exception URLs: webhook URLs contain secrets/tokens.
                     detail = f"HTTP {exc.code}" if isinstance(exc, HTTPError) else type(exc).__name__
                     log("ERROR", f"Check failed: {detail}. Pending messages retained.")
                     if args.once or args.dry_run:
