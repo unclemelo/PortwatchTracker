@@ -3,8 +3,10 @@
 Watch PortWatch VI tracker and GitHub branch changes and deliver them to Discord and/or Fluxer.
 Requires Python 3.9+ on Windows or Linux.
 
-* **Discord:** [Join the Discord server](https://discord.gg/4FGKx86Yx)
-* **Fluxer:** [Join the Fluxer server](https://fluxer.gg/YXWFI4j8)
+* **Discord:** [Join the Discord server](https://discord.gg/wPm2Aq4dWs)
+* **Fluxer:** [Join the Fluxer server](https://fluxer.gg/hvUfgSgu)
+
+* **Official PortWatch: ** https://fluxer.gg/WD8D7AaN
 
 | Fluxer | Discord |
 | :---: | :---: |
