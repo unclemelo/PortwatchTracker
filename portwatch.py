@@ -1,5 +1,5 @@
 """PortWatch VI -> Discord. Run on Windows or Linux with Python 3.9+.
-Install python-dotenv. Set DISCORD_WEBHOOK_URL in .env beside this script. Optional WATCH_REPOS is a
+Install with python -m pip install python-dotenv "colorama>=0.4.6". Set DISCORD_WEBHOOK_URL in .env beside this script. Optional WATCH_REPOS is a
 comma-separated owner/repo allowlist. Optional GITHUB_TOKEN raises API limits.
 Keep portwatch.sqlite3 beside this file. Stop with Ctrl+C.
 """
@@ -12,18 +12,36 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit, urlunsplit, parse_qsl
 from urllib.request import Request, urlopen
 
+from colorama import Fore, Style, just_fix_windows_console
 from dotenv import load_dotenv
 
 SITE = "https://portwatch-vi.xyz"
-INTERVAL = 3 * 3600
+INTERVAL = 1 * 3600
 ROOT = Path(__file__).resolve().parent
 REPO = re.compile(r"[\w.-]+/[\w.-]+", re.ASCII)
+
+
+LOG_COLORS = {
+    "WATCH": Fore.MAGENTA,
+    "INFO": Fore.CYAN,
+    "OK": Fore.GREEN,
+    "WARN": Fore.YELLOW,
+    "ERROR": Fore.RED,
+}
+
+
+def log(level, message):
+    label = f"[{level}]"
+    if sys.stdout.isatty() and not os.getenv("NO_COLOR"):
+        label = f"{Style.BRIGHT}{LOG_COLORS[level]}{label}{Style.RESET_ALL}"
+    print(f"{datetime.now():%H:%M:%S}  {label}  {message}", flush=True)
 
 
 def fetch(url, payload=None, token=None):
@@ -230,7 +248,7 @@ def collect(db, feed, allow, token):
             skipped[repo.lower()] = detail
             if dmca:
                 dmca_repos.add(repo.lower())
-            print(f"Skipped GitHub check for {repo}: {detail}", flush=True)
+            log("WARN", f"Skipped GitHub check for {repo}: {detail}")
     if allow and not changes:
         raise ValueError("No watched repositories matched the tracker")
     project_count = sum(key.startswith("project/") for key in changes)
@@ -240,8 +258,8 @@ def collect(db, feed, allow, token):
         status = f"{len(messages)} updates found."
     else:
         status = "No changes found."
-    print(f"{status} {project_count} projects; {checked_branches} branches checked; "
-          f"{len(skipped)} skipped.", flush=True)
+    log("WARN" if skipped else "OK", f"{status} {project_count} projects; {checked_branches} branches checked; "
+          f"{len(skipped)} skipped.")
     messages.insert(0, progress_report(watched_rows, checked_branches, skipped, dmca_repos, not saved, updates))
     return changes, messages
 
@@ -306,7 +324,7 @@ def deliver(db, webhook):
         fetch(url, payload=notification_payload(body))
         with db:
             db.execute("DELETE FROM queue WHERE id=?", (message_id,))
-        print(f"Delivered queued message {message_id}.", flush=True)
+        log("OK", f"Delivered queued message {message_id}.")
 
 
 @contextmanager
@@ -340,6 +358,7 @@ def single_instance(path):
 
 def main():
     global SITE
+    just_fix_windows_console()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--once", action="store_true", help="Check and deliver once, then exit")
     parser.add_argument("--dry-run", action="store_true", help="Check once without sending or saving")
@@ -352,6 +371,8 @@ def main():
     allow = {repo.strip().lower() for repo in os.getenv("WATCH_REPOS", "").split(",") if repo.strip()}
     token = os.getenv("GITHUB_TOKEN")
     with single_instance(ROOT / "portwatch.lock"):
+        mode = "dry run" if args.dry_run else "single check" if args.once else "watching every 1 hour"
+        log("WATCH", f"PortWatch VI · {mode}")
         if args.dry_run:
             db = open_database(":memory:")
             if (ROOT / "portwatch.sqlite3").exists():
@@ -374,9 +395,9 @@ def main():
                         messages = [check_report("Check failed: " + detail,
                                     "Repository and DMCA counts unavailable for this check.")]
                         check_failed = True
-                        print(f"Check failed: {detail}.", flush=True)
+                        log("ERROR", f"Check failed: {detail}.")
                     if args.dry_run:
-                        print(f"Dry run: {len(messages)} notifications; nothing sent or saved.", flush=True)
+                        log("INFO", f"Dry run: {len(messages)} notifications; nothing sent or saved.")
                     else:
                         save_updates(db, changes, messages)
                         deliver(db, webhook)
@@ -385,12 +406,12 @@ def main():
                 except (HTTPError, URLError, OSError, ValueError, KeyError) as exc:
                     # Do not log exception URLs: Discord URLs contain the webhook token.
                     detail = f"HTTP {exc.code}" if isinstance(exc, HTTPError) else type(exc).__name__
-                    print(f"Check failed: {detail}. Pending messages retained.", flush=True)
+                    log("ERROR", f"Check failed: {detail}. Pending messages retained.")
                     if args.once or args.dry_run:
                         return 1
                 if args.once or args.dry_run:
                     return 0
-                print("Next check in 3 hours.", flush=True)
+                log("INFO", "Next check in 1 hour.")
                 time.sleep(INTERVAL)
         finally:
             db.close()
@@ -400,7 +421,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        print("Stopped.")
+        log("INFO", "Stopped.")
     except RuntimeError as exc:
-        print(str(exc))
+        log("ERROR", str(exc))
         raise SystemExit(1)
