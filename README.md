@@ -1,4 +1,4 @@
-# pw-webhook
+# PortwatchTracker
 
 Watch PortWatch VI tracker and GitHub branch changes and deliver them to Discord and/or Fluxer.
 Requires Python 3.9+ on Windows or Linux.
