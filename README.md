@@ -8,7 +8,7 @@ Requires Python 3.9+ on Windows or Linux.
 
 | Fluxer | Discord |
 | :---: | :---: |
-| ![PortWatch VI Fluxer Webhook Preview](assets/FluxerWebhook.png) | ![PortWatch VI Discord Webhook Preview](assets/DiscordWebhhok.png) |
+| ![PortWatch VI Fluxer Webhook Preview](assets/FluxerWebhook.png) | ![PortWatch VI Discord Webhook Preview](assets/DiscordWebhook.png) |
 
 ---
 
