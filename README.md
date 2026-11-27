@@ -6,6 +6,14 @@ Requires Python 3.9+ on Windows or Linux.
 * **Discord:** [Join the Discord server](https://discord.gg/4FGKx86Yx)
 * **Fluxer:** [Join the Fluxer server](https://fluxer.gg/YXWFI4j8)
 
+| Fluxer | Discord |
+| :---: | :---: |
+| ![PortWatch VI Fluxer Webhook Preview](assets/FluxerWebhook.png) | ![PortWatch VI Discord Webhook Preview](assets/DiscordWebhhok.png) |
+
+---
+
+## Overview
+
 Install dependencies: `python -m pip install -r requirements.txt`.
 Set `DISCORD_WEBHOOK_URL` and/or `FLUXER_WEBHOOK_URL` in `.env` beside `portwatch.py`. Optional settings:
 `SITE` (defaults to https://portwatch-vi.xyz, including when blank),
